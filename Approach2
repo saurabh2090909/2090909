@@ -1,0 +1,44 @@
+
+Schnorr-based Blind Signatures + ZK Proof
+Schnorr signatures support efficient zero-knowledge proofs.
+
+The client creates a commitment to m = encode(score, nonce).
+
+Alongside the blind signature request, the client provides a ZK proof:
+
+“I know a value score and nonce such that m = H(score || nonce) and score ∈ [0,10]”.
+
+🧩 Tools used:
+Pedersen Commitments
+
+Bulletproofs or Sigma protocols
+
+Fiat-Shamir heuristic to make the proof non-interactive
+
+🔒 Result:
+FDS signs only if the proof is valid.
+
+Even though it can’t see the message, it’s cryptographically certain that m is valid.
+
+
+
+
+
+Include blinded_m in the proof statement
+When generating the proof, the client includes the blinded message blinded_m = m * r^e mod n in the public input of the proof.
+
+🔁 Proof statement becomes:
+“I know score, nonce, and r such that:
+
+m = encode(score, nonce)
+
+blinded_m = blind(m, r)
+
+score ∈ valid range”
+
+This proves that blinded_m is a correct blinding of an honestly constructed message.
+
+📌 Why it works:
+FDS verifies the proof AND the blinded message
+
+If the proof is about a different message, it won't match blinded_m
