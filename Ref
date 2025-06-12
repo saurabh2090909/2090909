@@ -1,0 +1,62 @@
+jGreat! If you’re diving into the technical foundation of how Apple’s Private Cloud Compute (PCC) implements blind signatures and fraud scoring in a privacy-preserving way, several **IETF RFCs** and drafts underpin the system. Below are the **relevant RFCs and standards** that explain the cryptographic and protocol-level techniques Apple is leveraging:
+
+---
+
+## 🔐 **1. RSA Blind Signatures**
+
+### ✅ **[RFC 9474 — RSA Blind Signatures](https://datatracker.ietf.org/doc/html/rfc9474)**
+
+* **Purpose**: Describes the blind signature scheme based on RSA, including blinding, signing, and unblinding algorithms.
+* **Relevance**: PCC uses **RSA Blind Signatures** to allow signing of tokens (TGTs, OTTs, fraud data) without revealing the message to the signer (e.g. FDS).
+* **Includes**: Security properties like **unlinkability**, **unforgeability**, and **blindness guarantees**.
+
+---
+
+## 🧾 **2. Privacy Pass Protocol**
+
+### ✅ **[RFC 9578 — Privacy Pass Architecture](https://datatracker.ietf.org/doc/html/rfc9578)**
+
+* **Purpose**: Describes the general architecture for **anonymous authentication tokens**.
+* **Relevance**: PCC’s flow is heavily based on **Privacy Pass**, especially the concept of issuing **unlinkable tokens** with rate-limiting and fraud scoring.
+* **Covers**: Issuer-blinded tokens, redemption, metadata enforcement (e.g., rate limits, fraud score association).
+
+### ✅ **[RFC 9481 — Privacy Pass HTTP API](https://datatracker.ietf.org/doc/html/rfc9481)**
+
+* Standardizes the HTTP interfaces used for Privacy Pass token issuance and redemption — useful if modeling client-server comms.
+
+---
+
+## 🧪 **3. Draft: Privacy Pass with Fraud Detection**
+
+While not yet standardized, Apple likely references this experimental work:
+
+### 🧪 **[draft-pauly-privacypass-device-attestation-01](https://datatracker.ietf.org/doc/html/draft-pauly-privacypass-device-attestation-01)**
+
+* **Authors include Apple employees** like Tommy Pauly.
+* Adds device attestation and **fraud detection hooks** to Privacy Pass.
+* Shows **how device-based fraud scoring can be integrated** while preserving privacy and unlinkability.
+
+---
+
+## 🧠 **4. Other Supporting RFCs & Concepts**
+
+### ✅ **[RFC 8017 — PKCS #1: RSA Cryptography Standard](https://datatracker.ietf.org/doc/html/rfc8017)**
+
+* Foundation for how RSA operations work, including **signing and verification**, and **padding schemes** (e.g., PKCS#1 v1.5, PSS).
+* RSA Blind Signatures in RFC 9474 are based on this.
+
+---
+
+## 🧩 Summary Table
+
+| RFC / Draft                                | Purpose                                              | Used In PCC For                          |
+| ------------------------------------------ | ---------------------------------------------------- | ---------------------------------------- |
+| RFC 9474                                   | RSA Blind Signatures                                 | TGTs, OTTs, Fraud Data signing           |
+| RFC 9578                                   | Privacy Pass Architecture                            | Anonymous client authorization           |
+| RFC 9481                                   | Privacy Pass HTTP API                                | Client-server token communication        |
+| draft-pauly-privacypass-device-attestation | Fraud detection & device attestation in Privacy Pass | Fraud scoring and secure metadata        |
+| RFC 8017                                   | RSA Cryptography                                     | Underlying math for signing/verification |
+
+---
+
+Let me know if you'd like annotated walkthroughs of these, or examples of how these RFCs are implemented in Apple's PCC flow!
