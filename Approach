@@ -1,0 +1,135 @@
+You're asking a **very important and subtle question**, and you're exactly right to challenge this:
+
+> ❓ **If the message `m` is blinded and signed by FDS, and `m` could be *anything*, how can TGS know what the *expected* message `m` is?**
+> Without this, **how can TGS verify that the client didn’t forge the fraud score?**
+
+Let’s unpack this in full, and then show how real-world systems solve it.
+
+---
+
+## 🔐 Core Problem Recap
+
+* The FDS uses **blind signatures**: it signs **without knowing the message `m`**.
+* TGS receives the unblinded `m` and the signature.
+* TGS can check that the signature is valid on `m`. But:
+
+> 🤨 **How does TGS know `m` encodes a valid fraud score? What stops the client from crafting a “low risk” score message and getting that blindly signed?**
+
+---
+
+## ✅ Solution: FDS Determines or Commits to `m`, Not the Client
+
+Even though FDS uses blind signatures, **the client doesn’t get to choose arbitrary `m`**. Here are the standard ways to enforce this:
+
+---
+
+### ✅ Approach 1: FDS sends a **commitment to m** (e.g. hash)
+
+**Flow:**
+
+1. **FDS calculates:**
+
+   $$
+   m = \text{encode}(fraud\_score, challenge)
+   $$
+
+   Then sends `H = SHA256(m)` to the client.
+2. Client must:
+
+   * **reconstruct the exact `m`**
+   * **blind `m`**, send it for signing
+   * later **present (`m`, signature)** to TGS
+3. TGS receives:
+
+   * `m`, `sig`
+   * also knows `H = SHA256(m)` from FDS (either passed through client or looked up)
+4. TGS checks:
+
+   * Signature is valid on `m`
+   * `H == SHA256(m)` ✅
+
+> 🔐 **This ensures the client didn’t choose `m` freely** — it had to match a pre-committed value from FDS.
+
+---
+
+### ✅ Approach 2: TGS knows `challenge` and reconstructs `m_expected`
+
+If TGS and FDS **agree on how `m` is encoded**, then TGS can reconstruct what the message **should** be.
+
+**Example:**
+
+1. TGS gives the client a `challenge: abc123`
+2. FDS computes:
+
+   $$
+   m = \text{SHA256}(“high” \| “abc123”)
+   $$
+
+   and signs `blind(m)`
+3. Later, the client sends:
+
+   * `m`, `signature`
+4. TGS knows:
+
+   * The `challenge` was `"abc123"`
+   * Expected fraud score was `"high"` (based on FDS logic or earlier info)
+   * So it reconstructs `m_expected` the same way.
+
+> 🔁 **If `m` ≠ `m_expected`, the signature is rejected**, even if it's valid — because TGS knows what message FDS *intended* to sign.
+
+---
+
+### ✅ Approach 3: FDS signs **structured fields** (score + challenge)
+
+Instead of hashing into a fixed `m`, `m` can be a binary-encoded message like:
+
+```plaintext
+m = {
+  score: 2 bits,
+  challenge: 256 bits,
+  version: 8 bits,
+  timestamp: 64 bits
+}
+```
+
+* FDS sends the `challenge` and instructs the client to construct `m` in this way.
+* TGS knows the format and expected values (`challenge`, `timestamp`, etc).
+* It parses the submitted `m` to verify:
+
+  * The fraud score is valid.
+  * The challenge matches what it issued.
+  * The timestamp is recent.
+  * Signature matches `m`.
+
+> ✅ Again: **TGS is not guessing `m_expected`** — it's deterministically reconstructing or parsing it based on protocol rules.
+
+---
+
+## 🚫 What Happens If Client Chooses Their Own `m`?
+
+If the client just chooses a `low` score and makes a valid-looking `m_fake`, here's what happens:
+
+* TGS reconstructs `m_expected` (or already knows `SHA256(m_expected)`)
+* It sees that `m_fake ≠ m_expected`
+* ❌ **Rejects the signature**, even if mathematically valid
+
+So:
+
+> 🔒 **Blind signing hides the message from FDS, but FDS *commits* to what the message must be.**
+> 🔎 **TGS verifies that the revealed message matches that commitment.**
+
+---
+
+## ✅ Final Summary
+
+| Your Question                                        | Answer                                                                |
+| ---------------------------------------------------- | --------------------------------------------------------------------- |
+| Can the client choose `m` freely?                    | ❌ No — `m` is either committed to or defined by FDS/TGS rules         |
+| How does TGS know what `m` to expect?                | TGS either reconstructs `m` from a challenge or checks a known hash   |
+| What if client submits valid signature on wrong `m`? | TGS checks the contents of `m` and rejects if it doesn’t match policy |
+
+---
+
+Would you like a **code demo** showing this with real hashing and blinding? Or a diagram of this trust model?
+
+Let me know what you'd like to explore next.
