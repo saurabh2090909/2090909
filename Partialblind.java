@@ -20,8 +20,8 @@ class Config {
     public static final int MODULUS_LEN = 256;
     // The hash algorithm used in PSS (e.g., SHA-256).
     public static final String HASH_ALGORITHM = "SHA-256";
-    // The mask generation function used in PSS (e.g., MGF1 with SHA-256).
-    public static final String MGF_ALGORITHM = "MGF1";
+    // The mask generation function used in PSS (e.g., MGF1).
+    public static final String MGF_ALGORITHM = "MGF1"; // Changed from "MGF1withSHA-256" for PSSParameterSpec
     // The length in bytes of the salt used in PSS. Typically same as hash output size.
     public static final int SALT_LEN = 32;
     // The algorithm string for RSASSA-PSS with specified hash and MGF.
@@ -373,7 +373,7 @@ class Client {
             Signature verifier = Signature.getInstance(Config.PSS_ALGORITHM, "BC"); // Use BC provider
             PSSParameterSpec pssSpec = new PSSParameterSpec(
                     Config.HASH_ALGORITHM,
-                    Config.MGF_ALGORITHM + "with" + Config.HASH_ALGORITHM,
+                    Config.MGF_ALGORITHM, // Corrected MGF algorithm name here
                     new MGF1ParameterSpec(Config.HASH_ALGORITHM),
                     Config.SALT_LEN,
                     PSSParameterSpec.TRAILER_FIELD_BC
@@ -512,7 +512,7 @@ class Verifier {
             Signature verifier = Signature.getInstance(Config.PSS_ALGORITHM, "BC"); // Use BC provider
             PSSParameterSpec pssSpec = new PSSParameterSpec(
                     Config.HASH_ALGORITHM,
-                    Config.MGF_ALGORITHM + "with" + Config.HASH_ALGORITHM,
+                    Config.MGF_ALGORITHM, // Corrected MGF algorithm name here
                     new MGF1ParameterSpec(Config.HASH_ALGORITHM),
                     Config.SALT_LEN,
                     PSSParameterSpec.TRAILER_FIELD_BC
