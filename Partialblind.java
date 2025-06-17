@@ -9,22 +9,24 @@ import java.security.spec.PSSParameterSpec;
 import java.util.Arrays;
 import java.util.Base64;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.crypto.Digest;
+import org.bouncycastle.crypto.digests.SHA256Digest;
+import org.bouncycastle.crypto.params.MGFParameters;
+import org.bouncycastle.crypto.generators.MGF1BytesGenerator;
 
 // --- Shared Configuration Parameters ---
 // The length in bytes of the RSA modulus n. This determines the size of keys and signatures.
 // For RSA 2048-bit key, 2048/8 = 256 bytes.
 class Config {
     public static final int MODULUS_LEN = 256;
-    // The hash algorithm used (e.g., SHA-256).
+    // The hash algorithm used in PSS (e.g., SHA-256).
     public static final String HASH_ALGORITHM = "SHA-256";
     // The mask generation function used in PSS (e.g., MGF1).
     public static final String MGF_ALGORITHM = "MGF1";
-    // The length in bytes of the salt used in PSS. Typically same as hash output size.
+    // The length in bytes of the salt used in PSS. Typically same as hash output size (32 bytes for SHA-256).
     public static final int SALT_LEN = 32;
-    // The algorithm string for RSASSA-PSS. Used for key generation, but verification will use SHA256withRSA for this demo.
+    // The algorithm string for RSASSA-PSS with specified hash and MGF.
     public static final String PSS_ALGORITHM = "RSASSA-PSS";
-    // Algorithm string for standard RSA signature over a hash (PKCS#1 v1.5 padding). Used for verification in this demo.
-    public static final String RSA_HASH_ALGORITHM = HASH_ALGORITHM + "withRSA";
 }
 
 // --- Helper Functions (Static for reusability across components) ---
@@ -51,8 +53,6 @@ class CryptoHelpers {
     /**
      * Converts an integer to a byte array of a specified length.
      * Note: This specifically handles the 4-byte info length as per the spec.
-     * For BigIntegers (like z or s), BigInteger.toByteArray() then padding is used,
-     * as `int` is insufficient for large RSA values.
      * @param value The integer value.
      * @param length The desired length of the byte array.
      * @return The byte array representation of the integer.
@@ -61,9 +61,6 @@ class CryptoHelpers {
         if (length == 4) {
             return ByteBuffer.allocate(4).putInt(value).array();
         } else {
-            // This method is primarily for the 4-byte length indicator.
-            // For general BigInteger to byte[] conversion, use BigInteger.toByteArray()
-            // with appropriate padding/truncation for MODULUS_LEN.
             throw new IllegalArgumentException("int_to_bytes for variable length not supported directly. Use BigInteger.toByteArray() for large numbers.");
         }
     }
@@ -218,6 +215,100 @@ class CryptoHelpers {
         }
         return m.modPow(d, n);
     }
+
+    /**
+     * Implements EMSA-PSS-ENCODE as specified in RFC 8017, Section 9.1.1.
+     * This function generates the PSS-encoded message block (EM) which is then
+     * converted to an integer 'm' for RSA modular exponentiation.
+     *
+     * @param M The message to be encoded (msg_prime in our context).
+     * @param emBits The intended length of the encoded message in bits (bit_len(n) - 1).
+     * @return The PSS-encoded message block (EM).
+     * @throws IllegalArgumentException if encoding parameters are invalid.
+     */
+    public static byte[] emsa_pss_encode(byte[] M, int emBits) throws NoSuchAlgorithmException {
+        // emLen is the length of EM in bytes. emBits is bit_len(n) - 1.
+        // (emBits + 7) / 8 effectively rounds up to the nearest byte.
+        int emLen = (emBits + 7) / 8;
+
+        // Use Bouncy Castle's Digest for hashing
+        Digest hash = new SHA256Digest(); // Using SHA-256 as per Config
+        int hLen = hash.getDigestSize(); // Output size of hash (32 bytes for SHA-256)
+        int sLen = Config.SALT_LEN;      // Configured salt length
+
+        // Step 1: mHash = Hash(M)
+        byte[] mHash = new byte[hLen];
+        hash.update(M, 0, M.length);
+        hash.doFinal(mHash, 0);
+        System.out.println("EMSA-PSS-ENCODE: mHash (Hash(M)) generated: " + Base64.getEncoder().encodeToString(mHash));
+
+
+        // Step 2: If emLen < hLen + sLen + 2, output "encoding error"
+        if (emLen < hLen + sLen + 2) {
+            throw new IllegalArgumentException("EMSA-PSS-ENCODE encoding error: emLen (" + emLen + ") too small for hLen (" + hLen + ") + sLen (" + sLen + ") + 2.");
+        }
+
+        // Step 3: Generate salt (random byte string of length sLen)
+        byte[] salt = new byte[sLen];
+        new SecureRandom().nextBytes(salt);
+        System.out.println("EMSA-PSS-ENCODE: Salt generated: " + Base64.getEncoder().encodeToString(salt));
+
+
+        // Step 4: M' = (0x)00...00 || mHash || salt (8 zero bytes || mHash || salt)
+        byte[] M_prime_prefix = new byte[8]; // 8 zero bytes as specified in RFC 8017
+        byte[] M_prime_for_hash = CryptoHelpers.concat(M_prime_prefix, mHash, salt);
+        System.out.println("EMSA-PSS-ENCODE: M' (for hash H) created. Length: " + M_prime_for_hash.length);
+
+        // Step 5: H = Hash(M')
+        byte[] H = new byte[hLen];
+        hash.update(M_prime_for_hash, 0, M_prime_for_hash.length);
+        hash.doFinal(H, 0);
+        System.out.println("EMSA-PSS-ENCODE: H (Hash(M')) generated: " + Base64.getEncoder().encodeToString(H));
+
+        // Step 6: PS (padding string of zeros). Length emLen - sLen - hLen - 2
+        int psLen = emLen - sLen - hLen - 2;
+        byte[] PS = new byte[psLen]; // All zeros by default in Java for new byte[]
+        System.out.println("EMSA-PSS-ENCODE: PS (padding string) created. Length: " + PS.length);
+
+        // Step 7: DB = PS || 0x01 || salt
+        byte[] DB = CryptoHelpers.concat(PS, new byte[]{0x01}, salt);
+        System.out.println("EMSA-PSS-ENCODE: DB created. Length: " + DB.length);
+
+        // Step 8: dbMask = MGF(H, emLen - hLen - 1)
+        byte[] dbMask = new byte[emLen - hLen - 1]; // Length of masked DB part
+        // MGF1 with the specified hash algorithm (SHA256Digest)
+        MGF1BytesGenerator mgf1 = new MGF1BytesGenerator(new SHA256Digest());
+        mgf1.init(new MGFParameters(H)); // Seed MGF with H
+        mgf1.generateBytes(dbMask, 0, dbMask.length);
+        System.out.println("EMSA-PSS-ENCODE: dbMask generated. Length: " + dbMask.length);
+
+
+        // Step 9: maskedDB = DB XOR dbMask
+        byte[] maskedDB = new byte[DB.length];
+        if (DB.length != dbMask.length) {
+            throw new IllegalStateException("DB length (" + DB.length + ") does not match dbMask length (" + dbMask.length + "). This indicates an internal calculation error in PSS encoding.");
+        }
+        for (int i = 0; i < DB.length; i++) {
+            maskedDB[i] = (byte) (DB[i] ^ dbMask[i]);
+        }
+        System.out.println("EMSA-PSS-ENCODE: maskedDB created.");
+
+
+        // Step 10: Set leftmost (8 * emLen - emBits) bits of maskedDB[0] to 0.
+        // emBits = bit_len(n) - 1. So, (8 * emLen - emBits) is the number of unused bits in the leftmost byte.
+        int numBitsToClear = (8 * emLen) - emBits;
+        if (numBitsToClear > 0) {
+            maskedDB[0] &= (byte) (0xFF >>> numBitsToClear);
+            System.out.println("EMSA-PSS-ENCODE: Cleared " + numBitsToClear + " leftmost bits of maskedDB[0].");
+        }
+
+        // Step 11: EM = maskedDB || H || 0xbc
+        byte[] EM = CryptoHelpers.concat(maskedDB, H, new byte[]{(byte) 0xbc});
+        System.out.println("EMSA-PSS-ENCODE: EM (Encoded Message) generated. Length: " + EM.length);
+
+        // Step 12: Output EM
+        return EM;
+    }
 }
 
 
@@ -233,68 +324,87 @@ class Client {
     }
 
     /**
-     * Prepares the message for blinding.
+     * Section 4.1: Prepares the message for blinding.
+     * As per the document: "Verification and the message that applications consume therefore depends on which
+     * preparation function is used."
      * @param type The type of preparation: "identity" or "randomize".
      * @return The prepared message (input_msg).
      */
     public byte[] prepare(String type) {
+        System.out.println("\n--- Client: Preparing Message (Section 4.1) ---");
         if ("identity".equalsIgnoreCase(type)) {
-            System.out.println("Client Prepare: Using PrepareIdentity.");
+            // PrepareIdentity: input_msg is simply msg.
+            System.out.println("Prepare: Using PrepareIdentity.");
             return originalMsg;
         } else if ("randomize".equalsIgnoreCase(type)) {
-            System.out.println("Client Prepare: Using PrepareRandomize.");
+            // PrepareRandomize: input_msg for blinding needs to be random_prefix || msg.
+            // The application message is then slice(input_msg, 32, len(input_msg)), i.e.,
+            // the prepared message with the random prefix removed.
+            System.out.println("Prepare: Using PrepareRandomize.");
             byte[] randomPrefix = new byte[32];
             new SecureRandom().nextBytes(randomPrefix);
-            return CryptoHelpers.concat(randomPrefix, originalMsg);
+            byte[] preparedMsg = CryptoHelpers.concat(randomPrefix, originalMsg);
+            System.out.println("Prepare: Random prefix added. Prepared message length: " + preparedMsg.length);
+            return preparedMsg;
         } else {
             throw new IllegalArgumentException("Invalid Prepare type: " + type);
         }
     }
 
     /**
-     * Blinds the prepared message using the server's public key and public metadata.
+     * Section 4.2: Blinds the prepared message using the server's public key and public metadata.
+     * This function now implements the full EMSA-PSS-ENCODE as per RFC 8017.
+     *
+     * Parameters: modulus_len, Hash, MGF, salt_len (configured as static fields).
      * @param pk The server's public key (n, e).
      * @param input_msg The prepared message byte string.
      * @return The blinded message (blind_msg).
      * @throws RuntimeException for various blinding errors.
      */
     public byte[] blind(PublicKey pk, byte[] input_msg) {
-        System.out.println("\n--- Client: Blinding Message ---");
+        System.out.println("\n--- Client: Blinding Message (Section 4.2) ---");
         // 1. msg_prime = concat("msg", int_to_bytes(len(info), 4), info, input_msg)
+        // This msg_prime is the 'M' input to EMSA-PSS-ENCODE.
         byte[] msgPrefix = "msg".getBytes(StandardCharsets.UTF_8);
         byte[] infoLenBytes = CryptoHelpers.int_to_bytes(publicInfo.length, 4);
         byte[] msg_prime = CryptoHelpers.concat(msgPrefix, infoLenBytes, publicInfo, input_msg);
-        System.out.println("1. msg_prime created. Length: " + msg_prime.length);
+        System.out.println("1. msg_prime (M for PSS encoding) created. Length: " + msg_prime.length);
 
-        // 2. encoded_msg = EMSA-PSS-ENCODE(msg_prime, bit_len(n) - 1)
-        // !!! IMPORTANT: EMSA-PSS-ENCODE IS CONCEPTUALLY SIMPLIFIED HERE FOR THE DEMO !!!
-        // In a real, compliant Partially Blind RSA implementation using RSASSA-PSS,
-        // this step would involve performing the full PSS padding on msg_prime to
-        // get the encoded message block 'EM', and then converting 'EM' to 'm'.
-        // Standard Java Signature API does not easily expose 'EM' directly.
-        // For this demo, 'm' is derived from a simple hash of 'msg_prime'.
-        // This is a simplification that leads to the need for a non-PSS verification
-        // in the Finalize/Verifier steps.
-        BigInteger m;
-        try {
-            MessageDigest md = MessageDigest.getInstance(Config.HASH_ALGORITHM, "BC"); // Use BC provider
-            byte[] hash = md.digest(msg_prime);
-            m = CryptoHelpers.bytes_to_int(hash); // Use hash as the conceptual 'm'
-            System.out.println("2. EMSA-PSS-ENCODE (conceptual): Hashed msg_prime to get m. Hash: " + Base64.getEncoder().encodeToString(hash));
-        } catch (NoSuchAlgorithmException | NoSuchProviderException e) {
-            throw new RuntimeException("Encoding error: " + e.getMessage(), e);
-        }
-
-        // Get RSA public key components for modulus n
+        // Get RSA public key components for modulus n to determine emBits
         java.security.interfaces.RSAPublicKey rsaPk = (java.security.interfaces.RSAPublicKey) pk;
         BigInteger n = rsaPk.getModulus();
+        int bitLenN = n.bitLength();
+        // emBits = bit_len(n) - 1 as specified for RSASSA-PSS
+        int emBits = bitLenN - 1;
+        System.out.println("RSA Modulus bit length (n.bitLength()): " + bitLenN + ", emBits: " + emBits);
+
+
+        // 2. encoded_msg = EMSA-PSS-ENCODE(msg_prime, emBits)
+        // This is the core update: perform full EMSA-PSS-ENCODE.
+        byte[] encoded_msg; // This is the EM block
+        try {
+            encoded_msg = CryptoHelpers.emsa_pss_encode(msg_prime, emBits);
+            System.out.println("2. EMSA-PSS-ENCODE completed. EM block generated.");
+            System.out.println("   EM block (Base64): " + Base64.getEncoder().encodeToString(encoded_msg));
+        } catch (NoSuchAlgorithmException | IllegalArgumentException e) {
+            // Catches errors from emsa_pss_encode, including "message too long" and "encoding error"
+            throw new RuntimeException("Encoding error during EMSA-PSS-ENCODE: " + e.getMessage(), e);
+        }
+
+        // 3. If EMSA-PSS-ENCODE raises an error, raise the error and stop (handled by try-catch above)
+
+        // 4. m = bytes_to_int(encoded_msg)
+        // The EM block is now converted to BigInteger 'm' for modular arithmetic.
+        BigInteger m = CryptoHelpers.bytes_to_int(encoded_msg);
+        System.out.println("4. Converted EM block to integer m.");
 
         // 5. c = is_coprime(m, n)
         boolean c = CryptoHelpers.is_coprime(m, n);
         System.out.println("5. m is coprime with n: " + c);
+
         // 6. If c is false, raise an "invalid input" error and stop
         if (!c) {
-            throw new RuntimeException("invalid input: message (m) is not co-prime with n.");
+            throw new RuntimeException("invalid input: message (m) is not co-prime with n. This should be rare with proper PSS encoding.");
         }
 
         // 7. r = random_integer_uniform(1, n)
@@ -307,7 +417,7 @@ class Client {
             System.out.println("8. Calculated inverse of r (inv).");
         } catch (ArithmeticException e) {
             // 9. If inverse_mod fails, raise an "blinding error" error and stop
-            throw new RuntimeException("blinding error: Inverse of r cannot be found.", e);
+            throw new RuntimeException("blinding error: Inverse of r cannot be found (r is not coprime to n).", e);
         }
 
         // 10. pk_derived = DerivePublicKey(pk, info)
@@ -315,23 +425,28 @@ class Client {
         System.out.println("10. Derived public key (pk_derived).");
 
         // 11. x = RSAVP1(pk_derived, r)
+        // x = r^e mod n
         BigInteger x = CryptoHelpers.RSAVP1(pk_derived, r);
         System.out.println("11. Computed x = RSAVP1(pk_derived, r).");
 
         // 12. z = m * x mod n
+        // This is the blinded message representative sent to the server.
         BigInteger z = m.multiply(x).mod(n);
-        System.out.println("12. Computed z = m * x mod n.");
+        System.out.println("12. Computed z = m * x mod n (blinded message representative).");
 
         // 13. blind_msg = int_to_bytes(z, modulus_len)
         byte[] blind_msg = CryptoHelpers.big_int_to_fixed_bytes(z, Config.MODULUS_LEN);
         System.out.println("13. Converted z to blind_msg byte array. Length: " + blind_msg.length);
 
-        System.out.println("Client Blind: Completed. Output blind_msg.");
+
+        // 14. output blind_msg, inv (inv stored internally)
+        System.out.println("Client Blind (Section 4.2): Completed. Output blind_msg.");
         return blind_msg;
     }
 
     /**
      * Client finalizes the signature and verifies it.
+     * This now uses RSASSA-PSS verification, as the blinding process is compliant.
      * @param pk Server's public key (n, e).
      * @param blind_sig Signed and blinded element, a byte string.
      * @return The final, unblinded, and verified signature (sig).
@@ -354,41 +469,44 @@ class Client {
         BigInteger n = rsaPk.getModulus();
 
         // 3. s = z * inv mod n
+        // This should recover the PSS-encoded message (EM) as an integer.
         BigInteger s = z.multiply(this.blindingInverse).mod(n);
-        System.out.println("3. Unblinded signature: s = z * inv mod n.");
+        System.out.println("3. Unblinded signature: s = z * inv mod n (This is the unblinded EM as an integer).");
 
         // 4. sig = int_to_bytes(s, modulus_len)
+        // Convert the unblinded integer back to byte array for verification.
         byte[] sig_bytes = CryptoHelpers.big_int_to_fixed_bytes(s, Config.MODULUS_LEN);
         System.out.println("4. Converted s to final signature (sig) byte array. Length: " + sig_bytes.length);
 
         // 5. msg_prime = concat("msg", int_to_bytes(len(info), 4), info, originalMsg)
+        // This is the 'M' that was originally fed to EMSA-PSS-ENCODE.
         byte[] msgPrefix = "msg".getBytes(StandardCharsets.UTF_8);
         byte[] infoLenBytes = CryptoHelpers.int_to_bytes(publicInfo.length, 4);
         byte[] msg_prime = CryptoHelpers.concat(msgPrefix, infoLenBytes, publicInfo, originalMsg); // Use original 'msg' here
-        System.out.println("5. Re-created msg_prime for verification. Length: " + msg_prime.length);
+        System.out.println("5. Re-created msg_prime (M for PSS verification). Length: " + msg_prime.length);
 
         // 6. pk_derived = DerivePublicKey(pk, info)
         PublicKey pk_derived = CryptoHelpers.DerivePublicKey(pk, publicInfo);
         System.out.println("6. Derived public key (pk_derived) for verification.");
 
         // 7. result = RSASSA-PSS-VERIFY(pk_derived, msg_prime, sig)
-        // !!! IMPORTANT: USING SHA256withRSA FOR VERIFICATION IN THIS DEMO !!!
-        // Due to the conceptual simplification of EMSA-PSS-ENCODE in the 'blind' function
-        // (where 'm' is just a hash), the resulting signature 'sig' is effectively
-        // a standard RSA signature over that hash (PKCS#1 v1.5 padding).
-        // A true RSASSA-PSS verification would fail as 'sig' doesn't conform to PSS structure.
-        // This change allows the demo to function and verify the signature produced.
-        // For strict compliance with the draft's RSASSA-PSS, the 'blind' function's EMSA-PSS-ENCODE
-        // would need to produce the full PSS-encoded message block.
+        // This will now correctly use RSASSA-PSS as the generated signature is PSS-compliant.
         boolean result;
         try {
-            Signature verifier = Signature.getInstance(Config.RSA_HASH_ALGORITHM, "BC"); // Changed to SHA256withRSA
-            // PSSParameterSpec is NOT needed for SHA256withRSA
+            Signature verifier = Signature.getInstance(Config.PSS_ALGORITHM, "BC"); // Using RSASSA-PSS with BC
+            PSSParameterSpec pssSpec = new PSSParameterSpec(
+                    Config.HASH_ALGORITHM,
+                    Config.MGF_ALGORITHM, // MGF1
+                    new MGF1ParameterSpec(Config.HASH_ALGORITHM), // MGF1 with SHA-256
+                    Config.SALT_LEN,
+                    PSSParameterSpec.TRAILER_FIELD_BC // 0xBC trailer
+            );
+            verifier.setParameter(pssSpec);
             verifier.initVerify(pk_derived);
-            verifier.update(msg_prime); // Still update with msg_prime, which is then internally hashed
-            result = verifier.verify(sig_bytes);
-            System.out.println("7. " + Config.RSA_HASH_ALGORITHM + " verification result: " + (result ? "Valid" : "Invalid"));
-        } catch (NoSuchAlgorithmException | InvalidKeyException | SignatureException | NoSuchProviderException e) {
+            verifier.update(msg_prime); // Update with the original message (M)
+            result = verifier.verify(sig_bytes); // Verify the unblinded PSS-encoded message (EM)
+            System.out.println("7. " + Config.PSS_ALGORITHM + " verification result: " + (result ? "Valid" : "Invalid"));
+        } catch (NoSuchAlgorithmException | InvalidKeyException | SignatureException | InvalidAlgorithmParameterException | NoSuchProviderException e) {
             throw new RuntimeException("Verification error: " + e.getMessage(), e);
         }
 
@@ -397,7 +515,7 @@ class Client {
             System.out.println("Client Finalize: Completed. Signature is VALID. Output sig.");
             return sig_bytes;
         } else {
-            throw new RuntimeException("invalid signature: " + Config.RSA_HASH_ALGORITHM + " verification failed.");
+            throw new RuntimeException("invalid signature: " + Config.PSS_ALGORITHM + " verification failed.");
         }
     }
 }
@@ -427,30 +545,35 @@ class Server {
     public byte[] blindSign(byte[] blind_msg, byte[] info) {
         System.out.println("\n--- Server: Blind Signing Message ---");
         // 1. m = bytes_to_int(blind_msg)
+        // This 'm' is the PSS-encoded message block as an integer, received from the client.
         BigInteger m = CryptoHelpers.bytes_to_int(blind_msg);
-        System.out.println("1. Converted blind_msg to integer m.");
+        System.out.println("1. Converted blind_msg to integer m (PSS-encoded message representative).");
 
         // 2. sk_derived, pk_derived = DeriveKeyPair(sk, info)
+        // The server derives the specific key pair based on the public metadata.
         KeyPair derivedKeyPair = CryptoHelpers.DeriveKeyPair(serverPrivateKey, serverPublicKey, info);
         PrivateKey sk_derived = derivedKeyPair.getPrivate();
         PublicKey pk_derived = derivedKeyPair.getPublic();
-        System.out.println("2. Derived key pair (sk_derived, pk_derived).");
+        System.out.println("2. Derived key pair (sk_derived, pk_derived) using info.");
 
         // 3. s = RSASP1(sk_derived, m)
+        // The server performs the raw RSA signature (modular exponentiation) on 'm'.
         BigInteger s = CryptoHelpers.RSASP1(sk_derived, m);
-        System.out.println("3. Computed s = RSASP1(sk_derived, m).");
+        System.out.println("3. Computed s = RSASP1(sk_derived, m) (raw RSA signature on PSS-encoded message).");
 
         // 4. m' = RSAVP1(pk_derived, s)
+        // Internal verification: server verifies its own signature.
         BigInteger m_prime = CryptoHelpers.RSAVP1(pk_derived, s);
-        System.out.println("4. Computed m' = RSAVP1(pk_derived, s).");
+        System.out.println("4. Computed m' = RSAVP1(pk_derived, s) (recovered PSS-encoded message representative).");
 
         // 5. If m != m', raise "signing failure" and stop
         if (!m.equals(m_prime)) {
-            throw new RuntimeException("signing failure: Internal verification failed (m != m').");
+            throw new RuntimeException("signing failure: Internal verification failed (m != m'). Recovered PSS-encoded message mismatch.");
         }
-        System.out.println("5. Internal verification passed (m == m').");
+        System.out.println("5. Internal verification passed (m == m'). Signature is consistent.");
 
         // 6. blind_sig = int_to_bytes(s, modulus_len)
+        // Convert the raw RSA signature back to byte array for sending to client.
         byte[] blind_sig_bytes = CryptoHelpers.big_int_to_fixed_bytes(s, Config.MODULUS_LEN);
         System.out.println("6. Converted s to blind_sig byte array. Length: " + blind_sig_bytes.length);
 
@@ -466,6 +589,8 @@ class Verifier {
     /**
      * Verifies the final signature. This simulates what a third party or
      * the application consuming the signed message would do.
+     * This now uses RSASSA-PSS verification, as the blinding process is compliant.
+     *
      * @param pk Server's public key.
      * @param msg Original message.
      * @param info Public metadata.
@@ -483,22 +608,17 @@ class Verifier {
                 input_msg_for_verification = msg;
                 System.out.println("Verifier: Using PrepareIdentity for msg_prime construction.");
             } else if ("randomize".equalsIgnoreCase(prepareType)) {
-                // !!! IMPORTANT CONSIDERATION FOR PrepareRandomize VERIFICATION !!!
-                // If 'PrepareRandomize' was used, the 'input_msg' that was actually signed included a 32-byte random prefix.
-                // For *correct* RSASSA-PSS-VERIFY, `msg_prime` MUST be derived from the exact `input_msg` that was blinded.
-                // The prompt's previous description for `Finalize` step 5 used `msg` (original message) for `msg_prime`.
-                // If `msg_prime` in `Finalize` uses `msg` *without* the random prefix when `PrepareRandomize` was used,
-                // then the `Finalize`'s own verification step (7) would fail unless the PSS scheme inherently deals with this,
-                // which is not standard.
-                // A correct verification of a signature produced with `PrepareRandomize` would require knowing the *exact*
-                // `input_msg` (including the random prefix) that was fed to `Blind`. Since a typical independent verifier
-                // would only have `msg` and `info`, this highlights a potential challenge or requires the random prefix
-                // to be communicated with the final signature for full compliance with the PSS spec.
-                // For this demo, aligning with the "application consumes slice(input_msg, 32, len(input_msg))"
-                // and the `Finalize` function's current behavior, we assume `msg` is sufficient for `msg_prime`
-                // in the context of RSASSA-PSS-VERIFY. In a real system, this would need careful design.
-                input_msg_for_verification = msg; // This is a simplification/assumption
-                System.out.println("Verifier: Assuming original msg for msg_prime construction in 'randomize' type (DEMO SIMPLIFICATION).");
+                // For `PrepareRandomize`, the `input_msg` that was blinded by the client included a 32-byte random prefix.
+                // The `msg_prime` for RSASSA-PSS verification *must* be derived from this exact `input_msg`.
+                // However, an independent verifier typically only has `msg` (original) and `info`.
+                // To properly verify a `PrepareRandomize` signature, the random prefix (or the full `input_msg`)
+                // would need to be transmitted along with the `msg` and `sig`.
+                // For this demo, aligning with the `Finalize` function's behavior (which uses `originalMsg` for `msg_prime`),
+                // we'll proceed with the assumption that `msg` (original) is the relevant part for the verifier's `msg_prime`.
+                // In a real-world scenario, this aspect of `PrepareRandomize` would need careful design regarding what is
+                // actually verified by an independent party.
+                input_msg_for_verification = msg; // This is a simplification/assumption for demo
+                System.out.println("Verifier: Assuming original msg for msg_prime construction in 'randomize' type (DEMO SIMPLIFICATION FOR VERIFICATION).");
             } else {
                 throw new IllegalArgumentException("Invalid Prepare type for verification: " + prepareType);
             }
@@ -508,21 +628,30 @@ class Verifier {
             System.out.println("Verifier: Derived public key (pk_derived) for verification.");
 
             // Compute msg_prime = concat("msg", int_to_bytes(len(info), 4), info, input_msg_for_verification).
+            // This 'msg_prime' is the 'M' input to the PSS encoding that the verifier internally performs.
             byte[] msgPrefix = "msg".getBytes(StandardCharsets.UTF_8);
             byte[] infoLenBytes = CryptoHelpers.int_to_bytes(info.length, 4);
             byte[] msg_prime_verify = CryptoHelpers.concat(msgPrefix, infoLenBytes, info, input_msg_for_verification);
-            System.out.println("Verifier: Re-created msg_prime. Length: " + msg_prime_verify.length);
+            System.out.println("Verifier: Re-created msg_prime (M for PSS verification). Length: " + msg_prime_verify.length);
 
-            // Invoke SHA256withRSA verification
-            Signature verifier = Signature.getInstance(Config.RSA_HASH_ALGORITHM, "BC"); // Changed to SHA256withRSA
-            // PSSParameterSpec is NOT needed for SHA256withRSA
+            // Invoke RSASSA-PSS-VERIFY
+            // This will now correctly use RSASSA-PSS as the generated signature is PSS-compliant.
+            Signature verifier = Signature.getInstance(Config.PSS_ALGORITHM, "BC"); // Using RSASSA-PSS with BC
+            PSSParameterSpec pssSpec = new PSSParameterSpec(
+                    Config.HASH_ALGORITHM,
+                    Config.MGF_ALGORITHM, // MGF1
+                    new MGF1ParameterSpec(Config.HASH_ALGORITHM), // MGF1 with SHA-256
+                    Config.SALT_LEN,
+                    PSSParameterSpec.TRAILER_FIELD_BC // 0xBC trailer
+            );
+            verifier.setParameter(pssSpec);
             verifier.initVerify(pk_derived_verify);
-            verifier.update(msg_prime_verify); // Still update with msg_prime, which is then internally hashed
-            boolean result = verifier.verify(sig);
-            System.out.println("Verifier: " + Config.RSA_HASH_ALGORITHM + " verification result: " + (result ? "Valid" : "Invalid"));
+            verifier.update(msg_prime_verify); // Update with the original message (M)
+            boolean result = verifier.verify(sig); // Verify the unblinded PSS-encoded message (EM)
+            System.out.println("Verifier: " + Config.PSS_ALGORITHM + " verification result: " + (result ? "Valid" : "Invalid"));
             return result;
 
-        } catch (NoSuchAlgorithmException | InvalidKeyException | SignatureException | NoSuchProviderException e) {
+        } catch (NoSuchAlgorithmException | InvalidKeyException | SignatureException | InvalidAlgorithmParameterException | NoSuchProviderException e) {
             System.err.println("Verifier error during verification: " + e.getMessage());
             return false;
         }
@@ -534,7 +663,7 @@ class Verifier {
 public class PartiallyBlindRSADemo {
 
     public static void main(String[] args) {
-        System.out.println("--- Starting Partially Blind RSA Demo with Separate Components and Bouncy Castle ---");
+        System.out.println("--- Starting Partially Blind RSA Demo with Separate Components and Bouncy Castle (Full PSS) ---");
 
         // Register Bouncy Castle provider
         Security.addProvider(new BouncyCastleProvider());
@@ -544,7 +673,7 @@ public class PartiallyBlindRSADemo {
         KeyPairGenerator keyGen;
         try {
             keyGen = KeyPairGenerator.getInstance("RSA", "BC"); // Use BC provider for key generation
-            keyGen.initialize(Config.MODULUS_LEN * 8, new SecureRandom()); // RSA key size in bits
+            keyGen.initialize(Config.MODULUS_LEN * 8, new SecureRandom()); // RSA key size in bits (e.g., 2048 bits for 256 bytes)
             KeyPair serverKeyPair = keyGen.generateKeyPair();
             System.out.println("\nGenerated Server RSA Key Pair.");
             System.out.println("Server Public Key Modulus Length (bytes): " + ((java.security.interfaces.RSAPublicKey)serverKeyPair.getPublic()).getModulus().toByteArray().length);
@@ -554,7 +683,7 @@ public class PartiallyBlindRSADemo {
             PublicKey serverPublicKey = server.getPublicKey();
 
             // Client's original message
-            byte[] clientOriginalMsg = "some text".getBytes(StandardCharsets.UTF_8);
+            byte[] clientOriginalMsg = "some text to be signed blindly".getBytes(StandardCharsets.UTF_8);
             System.out.println("\nClient's original message: '" + new String(clientOriginalMsg) + "'");
 
             // Public metadata (info)
