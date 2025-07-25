@@ -24,6 +24,7 @@ CMD ["python", "server.py"]
 
 
 
+
 # nginx/nginx.conf
 # Nginx configuration for Docker containers.
 # This configuration will be used by all Nginx proxy containers.
@@ -88,7 +89,6 @@ http {
         }
     }
 }
-
 
 
 
