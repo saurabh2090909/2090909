@@ -201,3 +201,17 @@ networks:
   default:
     driver: bridge
 
+
+
+
+
+echo "--- Testing User Alice (HTML Server) ---"
+curl -H "X-User-ID: Alice" http://localhost/
+curl -H "X-User-ID: Alice" http://localhost:8081/
+curl -H "X-User-ID: Alice" http://localhost:8082/
+
+echo "--- Testing User Bob (HTML Server) ---"
+curl -H "X-User-ID: Bob" http://localhost/
+curl -H "X-User-ID: Bob" http://localhost:8081/
+curl -H "X-User-ID: Bob" http://localhost:8082/
+
