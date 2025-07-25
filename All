@@ -1,0 +1,203 @@
+# Dockerfile.app
+# Dockerfile for the simple HTML server.
+
+# Use a lightweight Python base image
+FROM python:3.9-slim-buster
+
+# Set the working directory in the container
+WORKDIR /app
+
+# Copy the HTML file and the Python server script into the container
+COPY app/index.html .
+COPY app/server.py .
+
+# Expose port 8000, which is where the HTTP server will listen
+EXPOSE 8000
+
+# Command to run the Python HTTP server
+CMD ["python", "server.py"]
+
+
+
+
+
+
+
+
+# nginx/nginx.conf
+# Nginx configuration for Docker containers.
+# This configuration will be used by all Nginx proxy containers.
+
+worker_processes auto;
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for"';
+
+    access_log  /var/log/nginx/access.log  main;
+    error_log   /var/log/nginx/error.log warn;
+
+    sendfile        on;
+    keepalive_timeout  65;
+
+    # Define the upstream group containing all three application servers.
+    # In Docker Compose, service names (app1, app2, app3) resolve to container IPs.
+    upstream backend_application_servers {
+        server app1:8000; # Flask app in the 'app1' container
+        server app2:8000; # Flask app in the 'app2' container
+        server app3:8000; # Flask app in the 'app3' container
+
+        # Use consistent hashing based on the X-User-ID header.
+        hash $http_x_user_id consistent;
+    }
+
+    # Main server block for handling incoming HTTP requests.
+    server {
+        listen 80; # Nginx listens on port 80 inside the container.
+        server_name localhost;
+
+        # Location block to handle all requests.
+        location / {
+            # Ensure the X-User-ID header is present.
+            # If not, return a 400 Bad Request error.
+            if ($http_x_user_id = "") {
+                return 400 "X-User-ID header is required for routing.";
+            }
+
+            # Proxy the request to the defined upstream group.
+            proxy_pass http://backend_application_servers;
+
+            # Pass important headers to the backend application.
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-User-ID $http_x_user_id; # Pass the X-User-ID header to the app
+
+            # Set timeouts
+            proxy_connect_timeout 60s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 60s;
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+# Dockerfile.nginx
+# Dockerfile for the Nginx proxy.
+
+# Use the official Nginx base image
+FROM nginx:latest
+
+# Remove the default Nginx configuration
+RUN rm /etc/nginx/conf.d/default.conf
+
+# Copy our custom Nginx configuration into the container
+COPY nginx/nginx.conf /etc/nginx/conf.d/nginx.conf
+
+# Expose port 80, which is where Nginx will listen
+EXPOSE 80
+
+# The default Nginx CMD will start the server
+CMD ["nginx", "-g", "daemon off;"]
+
+
+
+
+
+
+
+
+
+
+
+# docker-compose.yml
+# Orchestrates the Flask application and Nginx proxy containers.
+
+version: '3.8'
+
+services:
+  # Define three Flask application instances
+  app1:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    environment:
+      - NODE_ID=node1 # Unique ID for this app instance
+    # No ports exposed directly to host, as Nginx will proxy to them
+    # restart: unless-stopped # Optional: Keep app running
+
+  app2:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    environment:
+      - NODE_ID=node2
+    # restart: unless-stopped
+
+  app3:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    environment:
+      - NODE_ID=node3
+    # restart: unless-stopped
+
+  # Define three Nginx proxy instances
+  # Each Nginx instance will have the same configuration,
+  # simulating the "smart reverse proxy on each node".
+  nginx1:
+    build:
+      context: .
+      dockerfile: Dockerfile.nginx
+    ports:
+      - "80:80" # Expose nginx1 on host port 80 (simulates ALB sending to Node 1)
+    depends_on:
+      - app1
+      - app2
+      - app3 # Ensure all apps are up before starting Nginx
+    # restart: unless-stopped
+
+  nginx2:
+    build:
+      context: .
+      dockerfile: Dockerfile.nginx
+    ports:
+      - "8081:80" # Expose nginx2 on host port 8081 (simulates ALB sending to Node 2)
+    depends_on:
+      - app1
+      - app2
+      - app3
+    # restart: unless-stopped
+
+  nginx3:
+    build:
+      context: .
+      dockerfile: Dockerfile.nginx
+    ports:
+      - "8082:80" # Expose nginx3 on host port 8082 (simulates ALB sending to Node 3)
+    depends_on:
+      - app1
+      - app2
+      - app3
+    # restart: unless-stopped
+
+# Define a custom network for all services to communicate
+networks:
+  default:
+    driver: bridge
+
