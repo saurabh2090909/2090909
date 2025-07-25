@@ -1,0 +1,67 @@
+# nginx/nginx.conf
+# This is the Nginx configuration file.
+
+# Line 1: These directives must be in the main context, outside of any other blocks.
+# Line 2:
+# Line 3:
+worker_processes auto; # Line 4: Nginx worker processes
+events {              # Line 5: Start of the events block
+    worker_connections 1024; # Max connections per worker
+}                     # End of the events block
+
+# The http block contains all HTTP-related configuration.
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for"';
+
+    access_log  /var/log/nginx/access.log  main;
+    error_log   /var/log/nginx/error.log warn;
+
+    sendfile        on;
+    keepalive_timeout  65;
+
+    # Define the upstream group containing all three application servers.
+    # In Docker Compose, service names (app1, app2, app3) resolve to container IPs.
+    upstream backend_application_servers {
+        server app1:8000; # Flask app in the 'app1' container
+        server app2:8000; # Flask app in the 'app2' container
+        server app3:8000; # Flask app in the 'app3' container
+
+        # Use consistent hashing based on the X-User-ID header.
+        hash $http_x_user_id consistent;
+    }
+
+    # Main server block for handling incoming HTTP requests.
+    server {
+        listen 80; # Nginx listens on port 80 inside the container.
+        server_name localhost;
+
+        # Location block to handle all requests.
+        location / {
+            # Ensure the X-User-ID header is present.
+            # If not, return a 400 Bad Request error.
+            if ($http_x_user_id = "") {
+                return 400 "X-User-ID header is required for routing.";
+            }
+
+            # Proxy the request to the defined upstream group.
+            proxy_pass http://backend_application_servers;
+
+            # Pass important headers to the backend application.
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-User-ID $http_x_user_id; # Pass the X-User-ID header to the app
+
+            # Set timeouts
+            proxy_connect_timeout 60s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 60s;
+        }
+    }
+}
